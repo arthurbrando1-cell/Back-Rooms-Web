@@ -1,0 +1,255 @@
+<!DOCTYPE html>
+<html lang="pt-br">
+<head>
+    <meta charset="UTF-8">
+    <title>Backrooms - Exiled Edition</title>
+    <link href="https://fonts.googleapis.com/css2?family=Press+Start+2P&display=swap" rel="stylesheet">
+    <style>
+        body { margin: 0; overflow: hidden; background: #111; font-family: 'Press Start 2P', cursive; color: white; }
+        #fade {
+            position: fixed; width: 100%; height: 100%; pointer-events: none;
+            background: radial-gradient(circle, rgba(0,0,0,0) 40%, rgba(0,0,0,0.9) 100%);
+            z-index: 5;
+        }
+        #ui-layer { position: absolute; width: 100%; height: 100%; z-index: 20; display: flex; align-items: center; }
+        #menu-principal { margin-left: 10%; display: flex; flex-direction: column; gap: 25px; }
+        .btn { background: none; border: none; color: white; font-family: 'Press Start 2P'; font-size: 20px; cursor: pointer; text-align: left; display: flex; align-items: center; gap: 15px; }
+        .btn:hover { color: #ffd700; }
+        .modal { display: none; position: fixed; top: 50%; left: 50%; transform: translate(-50%, -50%); background: rgba(0, 0, 0, 0.95); border: 4px solid white; padding: 40px; z-index: 30; text-align: center; min-width: 300px; }
+        .close-btn { margin-top: 20px; background: white; border: none; padding: 10px; cursor: pointer; font-family: 'Press Start 2P'; font-size: 10px; color: black; }
+        .hidden { display: none !important; }
+        .icon-play { width: 0; height: 0; border-top: 10px solid transparent; border-bottom: 10px solid transparent; border-left: 15px solid currentColor; }
+    </style>
+</head>
+<body>
+
+<div id="fade"></div>
+
+<div id="ui-layer">
+    <div id="menu-principal">
+        <h1 style="font-size: 32px; margin-bottom: 40px; color: #ffd700;">BACKROOMS</h1>
+        <button class="btn" onclick="startCutscene()"><div class="icon-play"></div> PLAY</button>
+        <button class="btn" onclick="openModal('modal-config')">CONFIG</button>
+        <button class="btn" onclick="openModal('modal-credits')">CREDITOS</button>
+    </div>
+</div>
+
+<div id="modal-config" class="modal">
+    <h2>CONFIGURAÇÕES</h2>
+    <p>VOLUME GERAL</p>
+    <input type="range" id="volumeSlider" min="0" max="1" step="0.1" value="0.5" style="width: 100%; cursor: pointer;">
+    <br><button class="close-btn" onclick="closeModal('modal-config')">FECHAR</button>
+</div>
+
+<div id="modal-credits" class="modal">
+    <h2>CREDITOS</h2>
+    <p>DESENVOLVIDO POR:</p>
+    <p style="color: #ffd700; font-size: 16px; margin: 20px 0;">EXILED</p>
+    <button class="close-btn" onclick="closeModal('modal-credits')">FECHAR</button>
+</div>
+
+<audio id="stepAudio" src="step.mp3"></audio>
+<audio id="ambientAudio" src="ambient.mp3" loop></audio>
+
+<script src="https://cdnjs.cloudflare.com/ajax/libs/three.js/r128/three.min.js"></script>
+
+<script>
+const TILE = 4, CHUNK_SIZE = 8;
+let gameRunning = false, inCutscene = false;
+let chunks = {}, colliders = [];
+
+const scene = new THREE.Scene();
+scene.fog = new THREE.Fog(0x222211, 2, 25);
+
+const camera = new THREE.PerspectiveCamera(75, window.innerWidth/window.innerHeight, 0.1, 100);
+const renderer = new THREE.WebGLRenderer({ antialias: true });
+renderer.setSize(window.innerWidth, window.innerHeight);
+document.body.appendChild(renderer.domElement);
+
+const ambientLight = new THREE.AmbientLight(0xfff5cc, 0.8);
+scene.add(ambientLight);
+
+const loader = new THREE.TextureLoader();
+const wallMat = new THREE.MeshLambertMaterial({ map: loader.load("texturewall.png"), color: 0xcccc88 });
+const groundMat = new THREE.MeshLambertMaterial({ map: loader.load("textureground.png"), color: 0x888855 });
+
+// --- PLAYER ---
+const playerGroup = new THREE.Group();
+const bodyMat = new THREE.MeshLambertMaterial({ color: 0xffd700 });
+const torso = new THREE.Mesh(new THREE.CylinderGeometry(0.25, 0.25, 0.7, 12), bodyMat);
+torso.position.set(0, -0.5, 0.25);
+playerGroup.add(torso);
+
+const pivotL = new THREE.Group();
+const legL = new THREE.Mesh(new THREE.CylinderGeometry(0.08, 0.08, 0.7, 8), bodyMat);
+legL.position.y = -0.35; pivotL.add(legL); pivotL.position.set(-0.15, -0.9, 0.25);
+
+const pivotR = new THREE.Group();
+const legR = new THREE.Mesh(new THREE.CylinderGeometry(0.08, 0.08, 0.7, 8), bodyMat);
+legR.position.y = -0.35; pivotR.add(legR); pivotR.position.set(0.15, -0.9, 0.25);
+
+playerGroup.add(pivotL, pivotR);
+scene.add(playerGroup);
+
+// --- SCP ---
+const scpTex = loader.load("scp.png");
+const scpMat = new THREE.SpriteMaterial({ map: scpTex });
+const scp = new THREE.Sprite(scpMat);
+scp.scale.set(2.5, 2.5, 1);
+scp.position.y = 1.25;
+scp.visible = false;
+scene.add(scp);
+
+let scpActive = false, scpSpawnTimer = 0, scpHideTimer = 0;
+
+// --- GERAÇÃO MAPA ---
+const SEED = 777;
+function mulberry32(a) {
+    return function() {
+        let t = a += 0x6D2B79F5;
+        t = Math.imul(t ^ t >>> 15, t | 1);
+        t ^= t + Math.imul(t ^ t >>> 7, t | 61);
+        return ((t ^ t >>> 14) >>> 0) / 4294967296;
+    }
+}
+
+function createChunk(cx, cz) {
+    const group = new THREE.Group();
+    const rand = mulberry32(SEED + cx * 13 + cz * 17);
+    for (let x = 0; x < CHUNK_SIZE; x++) {
+        for (let z = 0; z < CHUNK_SIZE; z++) {
+            let wx = (cx * CHUNK_SIZE + x) * TILE, wz = (cz * CHUNK_SIZE + z) * TILE;
+            const floor = new THREE.Mesh(new THREE.PlaneBufferGeometry(TILE, TILE), groundMat);
+            floor.rotation.x = -Math.PI/2; floor.position.set(wx, 0, wz); group.add(floor);
+            const ceil = new THREE.Mesh(new THREE.PlaneBufferGeometry(TILE, TILE), wallMat);
+            ceil.rotation.x = Math.PI/2; ceil.position.set(wx, 3, wz); group.add(ceil);
+            if (rand() > 0.8 && (Math.abs(wx) > 6 || Math.abs(wz) > 6)) {
+                const wall = new THREE.Mesh(new THREE.BoxGeometry(TILE, 3, 0.5), wallMat);
+                wall.position.set(wx, 1.5, wz); if (rand() > 0.5) wall.rotation.y = Math.PI/2;
+                group.add(wall); colliders.push(new THREE.Box3().setFromObject(wall));
+            }
+        }
+    }
+    scene.add(group); chunks[`${cx}_${cz}`] = group;
+}
+
+// --- AUDIO ---
+const stepAudio = document.getElementById('stepAudio');
+const ambientAudio = document.getElementById('ambientAudio');
+const volumeSlider = document.getElementById('volumeSlider');
+
+volumeSlider.addEventListener('input', () => {
+    ambientAudio.volume = volumeSlider.value;
+});
+
+function playStepSound() {
+    const soundClone = stepAudio.cloneNode();
+    soundClone.volume = volumeSlider.value;
+    soundClone.play();
+}
+
+// --- LOGICA SCP ---
+function updateSCP() {
+    if (!gameRunning) return;
+    if (!scpActive) {
+        scpSpawnTimer++;
+        if (scpSpawnTimer > 600) {
+            let angle = Math.random() * Math.PI * 2;
+            scp.position.set(camera.position.x + Math.cos(angle)*18, 1.25, camera.position.z + Math.sin(angle)*18);
+            scp.visible = true; scpActive = true; scpSpawnTimer = 0;
+        }
+    } else {
+        let dir = new THREE.Vector3().subVectors(camera.position, scp.position).normalize();
+        let ray = new THREE.Raycaster(scp.position, dir, 0, 25);
+        let canSee = true;
+        let intersects = ray.intersectObjects(scene.children, true);
+        for(let i of intersects) { if(i.object.geometry.type === "BoxGeometry" && i.distance < scp.position.distanceTo(camera.position)) { canSee = false; break; } }
+        if (canSee) {
+            scp.position.x += dir.x * 0.06; scp.position.z += dir.z * 0.06; scpHideTimer = 0;
+            if (scp.position.distanceTo(camera.position) < 1.2) location.reload();
+        } else {
+            scpHideTimer++; if (scpHideTimer > 300) { scp.visible = false; scpActive = false; }
+        }
+    }
+}
+
+// --- SISTEMA DE JOGO ---
+function startCutscene() { 
+    document.getElementById('ui-layer').classList.add('hidden'); 
+    inCutscene = true; 
+    camera.position.set(0, 10, 0); 
+    camera.rotation.x = -Math.PI/2;
+}
+
+function openModal(id) { document.getElementById(id).style.display = 'block'; }
+function closeModal(id) { document.getElementById(id).style.display = 'none'; }
+
+let keys = {}, yaw = 0, pitch = 0;
+document.addEventListener("keydown", e => keys[e.code] = true);
+document.addEventListener("keyup", e => keys[e.code] = false);
+document.addEventListener("mousemove", e => { 
+    if (document.pointerLockElement && gameRunning) { 
+        yaw -= e.movementX * 0.002; 
+        pitch = Math.max(-1.4, Math.min(1.4, pitch - e.movementY * 0.002)); 
+        camera.rotation.set(pitch, yaw, 0, 'YXZ'); 
+    } 
+});
+
+let walkTime = 0, lastStepTime = 0;
+const stepInterval = 450;
+
+function update() {
+    if (inCutscene) {
+        camera.position.y -= 0.12; camera.rotation.x += 0.018;
+        if (camera.position.y <= 1.7) { 
+            camera.position.y = 1.7; 
+            camera.rotation.x = 0; 
+            inCutscene = false; 
+            gameRunning = true; 
+            document.body.requestPointerLock(); 
+            // Começa o som ambiente
+            ambientAudio.volume = volumeSlider.value;
+            ambientAudio.play();
+        }
+    }
+    if (gameRunning) {
+        let mx = 0, mz = 0;
+        if (keys["KeyW"]) mz -= 1; if (keys["KeyS"]) mz += 1;
+        if (keys["KeyA"]) mx -= 1; if (keys["KeyD"]) mx += 1;
+        
+        if (mx !== 0 || mz !== 0) {
+            let speed = 0.12;
+            let vx = (Math.cos(yaw) * mx + Math.sin(yaw) * mz) * speed;
+            let vz = (Math.sin(yaw) * -mx + Math.cos(yaw) * mz) * speed;
+            let ox = camera.position.x, oz = camera.position.z;
+            camera.position.x += vx;
+            let pBox = new THREE.Box3().setFromCenterAndSize(camera.position, new THREE.Vector3(0.5, 1, 0.5));
+            for(let b of colliders) if(pBox.intersectsBox(b)) camera.position.x = ox;
+            camera.position.z += vz;
+            pBox.setFromCenterAndSize(camera.position, new THREE.Vector3(0.5, 1, 0.5));
+            for(let b of colliders) if(pBox.intersectsBox(b)) camera.position.z = oz;
+            
+            walkTime += 0.16;
+            pivotL.rotation.x = Math.sin(walkTime)*0.6;
+            pivotR.rotation.x = Math.sin(walkTime+Math.PI)*0.6;
+
+            if (Date.now() - lastStepTime > stepInterval) {
+                playStepSound();
+                lastStepTime = Date.now();
+            }
+        } else { pivotL.rotation.x = 0; pivotR.rotation.x = 0; }
+        playerGroup.position.copy(camera.position); playerGroup.rotation.y = yaw;
+        updateSCP();
+    }
+}
+
+function animate() {
+    requestAnimationFrame(animate); update();
+    let cx = Math.floor(camera.position.x / 32), cz = Math.floor(camera.position.z / 32);
+    for (let x = -2; x <= 2; x++) for (let z = -2; z <= 2; z++) if (!chunks[`${cx+x}_${cz+z}`]) createChunk(cx+x, cz+z);
+    renderer.render(scene, camera);
+}
+camera.position.set(0, 1.7, 0); animate();
+</script>
+</body>
+</html>
